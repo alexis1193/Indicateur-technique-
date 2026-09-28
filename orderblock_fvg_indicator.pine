@@ -1,93 +1,110 @@
 //@version=5
-indicator("Order Blocks + FVG", overlay = true, max_boxes_count = 500)
+indicator("OB + FVG Toolkit — Alexis", overlay=true, max_boxes_count=500)
 
-// --- Inputs ---
-showOB = input.bool(true, "Afficher les Order Blocks")
-showFVG = input.bool(true, "Afficher les FVG")
-extendBars = input.int(30, "Extension des zones (barres)", minval = 1)
-swingLen = input.int(5, "Longueur de détection de structure (swing)", minval = 1)
-atrLen = input.int(14, "Période ATR (filtre de significativité)", minval = 1)
-obAtrMult = input.float(1.2, "Déplacement minimum pour un Order Block (x ATR)", minval = 0.1, step = 0.1)
-fvgAtrMult = input.float(0.3, "Taille minimum d'un FVG (x ATR)", minval = 0.05, step = 0.05)
-deleteOnMitigation = input.bool(true, "Supprimer une zone une fois retestée (mitigation)")
+// ==================== INPUTS ====================
+grp_fvg = "Fair Value Gap (FVG)"
+showFVG          = input.bool(true, "Afficher les FVG", group=grp_fvg)
+fvgBullColor     = input.color(color.new(color.teal, 70), "Couleur FVG haussier", group=grp_fvg)
+fvgBearColor     = input.color(color.new(color.red, 70), "Couleur FVG baissier", group=grp_fvg)
+fvgExtend        = input.int(20, "Extension des FVG non comblés (bougies)", minval=1, group=grp_fvg)
+fvgRemoveOnFill  = input.bool(true, "Supprimer le FVG une fois comblé", group=grp_fvg)
+fvgMinGapATR     = input.float(0.0, "Taille min. du gap (x ATR14, 0 = désactivé)", minval=0.0, step=0.1, group=grp_fvg)
 
-obColor = color.new(color.blue, 70)
-fvgColor = color.new(color.fuchsia, 70)
+grp_ob = "Order Blocks (OB)"
+showOB               = input.bool(true, "Afficher les Order Blocks", group=grp_ob)
+obSwingLength        = input.int(10, "Longueur de détection des swings", minval=2, group=grp_ob)
+obBullColor          = input.color(color.new(color.blue, 75), "Couleur OB haussier", group=grp_ob)
+obBearColor          = input.color(color.new(color.orange, 75), "Couleur OB baissier", group=grp_ob)
+obExtend             = input.int(30, "Extension des OB non testés (bougies)", minval=1, group=grp_ob)
+obRemoveOnMitigation = input.bool(true, "Supprimer l'OB une fois mitigé", group=grp_ob)
+obUseBodyOnly        = input.bool(false, "Utiliser le corps de bougie uniquement (pas la mèche)", group=grp_ob)
 
-atrVal = ta.atr(atrLen)
+grp_alert = "Alertes"
+alertOnNewOB      = input.bool(false, "Alerte à la formation d'un nouvel OB", group=grp_alert)
+alertOnNewFVG     = input.bool(false, "Alerte à la formation d'un nouveau FVG", group=grp_alert)
+alertOnMitigation = input.bool(false, "Alerte quand un OB/FVG est testé", group=grp_alert)
 
-// --- Structure de marché : derniers swing high / low confirmés ---
-swingHigh = ta.pivothigh(high, swingLen, swingLen)
-swingLow  = ta.pivotlow(low, swingLen, swingLen)
+// ==================== FVG ====================
+atr14 = ta.atr(14)
 
-var float lastSwingHigh = na
-var float lastSwingLow  = na
+var box[] bullFvgBoxes = array.new_box(0)
+var box[] bearFvgBoxes = array.new_box(0)
 
-if not na(swingHigh)
-    lastSwingHigh := swingHigh
-if not na(swingLow)
-    lastSwingLow := swingLow
+bullGap = low - high[2]
+bearGap = low[2] - high
 
-// --- Cassure de structure (Break of Structure) ---
-bosUp   = not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh
-bosDown = not na(lastSwingLow) and close < lastSwingLow and close[1] >= lastSwingLow
+isBullFVG = showFVG and bullGap > 0 and (fvgMinGapATR == 0 or bullGap >= fvgMinGapATR * atr14)
+isBearFVG = showFVG and bearGap > 0 and (fvgMinGapATR == 0 or bearGap >= fvgMinGapATR * atr14)
 
-// --- Déplacement significatif (filtre anti faux signal) ---
-strongMoveUp   = close > open and (close - open) > atrVal * obAtrMult
-strongMoveDown = open > close and (open - close) > atrVal * obAtrMult
+if isBullFVG
+    b = box.new(bar_index[2], low, bar_index + fvgExtend, high[2], border_color=color.new(fvgBullColor, 0), bgcolor=fvgBullColor, extend=extend.none)
+    array.push(bullFvgBoxes, b)
+    if alertOnNewFVG
+        alert("Nouveau FVG haussier détecté sur " + syminfo.ticker, alert.freq_once_per_bar_close)
 
-// --- Order Blocks : dernière bougie opposée avant un déplacement qui casse la structure ---
-bullishOB = bosUp and strongMoveUp and close[1] < open[1]
-bearishOB = bosDown and strongMoveDown and close[1] > open[1]
+if isBearFVG
+    b = box.new(bar_index[2], low[2], bar_index + fvgExtend, high, border_color=color.new(fvgBearColor, 0), bgcolor=fvgBearColor, extend=extend.none)
+    array.push(bearFvgBoxes, b)
+    if alertOnNewFVG
+        alert("Nouveau FVG baissier détecté sur " + syminfo.ticker, alert.freq_once_per_bar_close)
 
-var array<box> bullishBoxes = array.new<box>()
-var array<box> bearishBoxes = array.new<box>()
-
-if showOB and bullishOB
-    array.push(bullishBoxes, box.new(bar_index[1], high[1], bar_index[1] + extendBars, low[1], border_color = color.blue, bgcolor = obColor))
-
-if showOB and bearishOB
-    array.push(bearishBoxes, box.new(bar_index[1], high[1], bar_index[1] + extendBars, low[1], border_color = color.blue, bgcolor = obColor))
-
-// --- FVG filtré par taille minimum (ATR) ---
-gapUpSize   = low - high[2]
-gapDownSize = low[2] - high
-
-bullishFVG = gapUpSize > 0 and gapUpSize > atrVal * fvgAtrMult
-bearishFVG = gapDownSize > 0 and gapDownSize > atrVal * fvgAtrMult
-
-var array<box> fvgBullBoxes = array.new<box>()
-var array<box> fvgBearBoxes = array.new<box>()
-
-if showFVG and bullishFVG
-    array.push(fvgBullBoxes, box.new(bar_index[2], low, bar_index + extendBars, high[2], border_color = color.fuchsia, bgcolor = fvgColor))
-
-if showFVG and bearishFVG
-    array.push(fvgBearBoxes, box.new(bar_index[2], low[2], bar_index + extendBars, high, border_color = color.fuchsia, bgcolor = fvgColor))
-
-// --- Mitigation : on supprime une zone dès qu'elle est retestée par le prix ---
-if deleteOnMitigation
-    if array.size(bullishBoxes) > 0
-        for i = array.size(bullishBoxes) - 1 to 0
-            b = array.get(bullishBoxes, i)
-            if low <= box.get_bottom(b)
+manageFvg(arr, isBull) =>
+    if array.size(arr) > 0
+        for i = array.size(arr) - 1 to 0
+            b = array.get(arr, i)
+            top = box.get_top(b)
+            bot = box.get_bottom(b)
+            filled = isBull ? low <= bot : high >= top
+            if filled and fvgRemoveOnFill
                 box.delete(b)
-                array.remove(bullishBoxes, i)
-    if array.size(bearishBoxes) > 0
-        for i = array.size(bearishBoxes) - 1 to 0
-            b = array.get(bearishBoxes, i)
-            if high >= box.get_top(b)
+                array.remove(arr, i)
+                if alertOnMitigation
+                    alert((isBull ? "FVG haussier" : "FVG baissier") + " comblé sur " + syminfo.ticker, alert.freq_once_per_bar_close)
+            else
+                box.set_right(b, bar_index + fvgExtend)
+
+manageFvg(bullFvgBoxes, true)
+manageFvg(bearFvgBoxes, false)
+
+// ==================== ORDER BLOCKS ====================
+var box[] bullObBoxes = array.new_box(0)
+var box[] bearObBoxes = array.new_box(0)
+
+swingHigh = ta.pivothigh(high, obSwingLength, obSwingLength)
+swingLow  = ta.pivotlow(low, obSwingLength, obSwingLength)
+
+if showOB and not na(swingLow) and close[obSwingLength] < open[obSwingLength]
+    pivotBarIndex = bar_index - obSwingLength
+    top = obUseBodyOnly ? math.max(open[obSwingLength], close[obSwingLength]) : high[obSwingLength]
+    bot = obUseBodyOnly ? math.min(open[obSwingLength], close[obSwingLength]) : low[obSwingLength]
+    b = box.new(pivotBarIndex, top, bar_index + obExtend, bot, border_color=color.new(obBullColor, 0), bgcolor=obBullColor, extend=extend.none)
+    array.push(bullObBoxes, b)
+    if alertOnNewOB
+        alert("Nouvel Order Block haussier détecté sur " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+if showOB and not na(swingHigh) and close[obSwingLength] > open[obSwingLength]
+    pivotBarIndex = bar_index - obSwingLength
+    top = obUseBodyOnly ? math.max(open[obSwingLength], close[obSwingLength]) : high[obSwingLength]
+    bot = obUseBodyOnly ? math.min(open[obSwingLength], close[obSwingLength]) : low[obSwingLength]
+    b = box.new(pivotBarIndex, top, bar_index + obExtend, bot, border_color=color.new(obBearColor, 0), bgcolor=obBearColor, extend=extend.none)
+    array.push(bearObBoxes, b)
+    if alertOnNewOB
+        alert("Nouvel Order Block baissier détecté sur " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+manageOb(arr, isBull) =>
+    if array.size(arr) > 0
+        for i = array.size(arr) - 1 to 0
+            b = array.get(arr, i)
+            top = box.get_top(b)
+            bot = box.get_bottom(b)
+            mitigated = isBull ? low <= top : high >= bot
+            if mitigated and obRemoveOnMitigation
                 box.delete(b)
-                array.remove(bearishBoxes, i)
-    if array.size(fvgBullBoxes) > 0
-        for i = array.size(fvgBullBoxes) - 1 to 0
-            b = array.get(fvgBullBoxes, i)
-            if low <= box.get_bottom(b)
-                box.delete(b)
-                array.remove(fvgBullBoxes, i)
-    if array.size(fvgBearBoxes) > 0
-        for i = array.size(fvgBearBoxes) - 1 to 0
-            b = array.get(fvgBearBoxes, i)
-            if high >= box.get_top(b)
-                box.delete(b)
-                array.remove(fvgBearBoxes, i)
+                array.remove(arr, i)
+                if alertOnMitigation
+                    alert((isBull ? "Order Block haussier" : "Order Block baissier") + " mitigé sur " + syminfo.ticker, alert.freq_once_per_bar_close)
+            else
+                box.set_right(b, bar_index + obExtend)
+
+manageOb(bullObBoxes, true)
+manageOb(bearObBoxes, false)
