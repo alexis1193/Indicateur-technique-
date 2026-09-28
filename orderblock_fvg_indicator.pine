@@ -24,12 +24,53 @@ alertOnNewOB      = input.bool(false, "Alerte à la formation d'un nouvel OB", g
 alertOnNewFVG     = input.bool(false, "Alerte à la formation d'un nouveau FVG", group=grp_alert)
 alertOnMitigation = input.bool(false, "Alerte quand un OB/FVG est testé", group=grp_alert)
 
+// ==================== FONCTIONS DE GESTION DES ZONES ====================
+// Étend une zone non testée, ou la supprime si le prix l'a retraversée.
+// IMPORTANT : ces fonctions doivent être appelées AVANT la création d'une
+// nouvelle zone sur la bougie en cours, sinon une zone tout juste créée
+// serait immédiatement testée avec le prix de sa propre bougie de création
+// et supprimée avant même d'être visible à l'écran.
+manageFvg(arr, isBull) =>
+    if array.size(arr) > 0
+        for i = array.size(arr) - 1 to 0
+            b = array.get(arr, i)
+            top = box.get_top(b)
+            bot = box.get_bottom(b)
+            filled = isBull ? low <= bot : high >= top
+            if filled and fvgRemoveOnFill
+                box.delete(b)
+                array.remove(arr, i)
+                if alertOnMitigation
+                    alert((isBull ? "FVG haussier" : "FVG baissier") + " comblé sur " + syminfo.ticker, alert.freq_once_per_bar_close)
+            else
+                box.set_right(b, bar_index + fvgExtend)
+
+manageOb(arr, isBull) =>
+    if array.size(arr) > 0
+        for i = array.size(arr) - 1 to 0
+            b = array.get(arr, i)
+            top = box.get_top(b)
+            bot = box.get_bottom(b)
+            mitigated = isBull ? low <= top : high >= bot
+            if mitigated and obRemoveOnMitigation
+                box.delete(b)
+                array.remove(arr, i)
+                if alertOnMitigation
+                    alert((isBull ? "Order Block haussier" : "Order Block baissier") + " mitigé sur " + syminfo.ticker, alert.freq_once_per_bar_close)
+            else
+                box.set_right(b, bar_index + obExtend)
+
 // ==================== FVG ====================
 atr14 = ta.atr(14)
 
 var box[] bullFvgBoxes = array.new_box(0)
 var box[] bearFvgBoxes = array.new_box(0)
 
+// 1) On gère d'abord les zones existantes (créées lors des bougies précédentes)
+manageFvg(bullFvgBoxes, true)
+manageFvg(bearFvgBoxes, false)
+
+// 2) Puis seulement on détecte et crée une nouvelle zone sur la bougie en cours
 bullGap = low - high[2]
 bearGap = low[2] - high
 
@@ -48,28 +89,15 @@ if isBearFVG
     if alertOnNewFVG
         alert("Nouveau FVG baissier détecté sur " + syminfo.ticker, alert.freq_once_per_bar_close)
 
-manageFvg(arr, isBull) =>
-    if array.size(arr) > 0
-        for i = array.size(arr) - 1 to 0
-            b = array.get(arr, i)
-            top = box.get_top(b)
-            bot = box.get_bottom(b)
-            filled = isBull ? low <= bot : high >= top
-            if filled and fvgRemoveOnFill
-                box.delete(b)
-                array.remove(arr, i)
-                if alertOnMitigation
-                    alert((isBull ? "FVG haussier" : "FVG baissier") + " comblé sur " + syminfo.ticker, alert.freq_once_per_bar_close)
-            else
-                box.set_right(b, bar_index + fvgExtend)
-
-manageFvg(bullFvgBoxes, true)
-manageFvg(bearFvgBoxes, false)
-
 // ==================== ORDER BLOCKS ====================
 var box[] bullObBoxes = array.new_box(0)
 var box[] bearObBoxes = array.new_box(0)
 
+// 1) On gère d'abord les zones existantes
+manageOb(bullObBoxes, true)
+manageOb(bearObBoxes, false)
+
+// 2) Puis on détecte et crée une nouvelle zone sur la bougie en cours
 swingHigh = ta.pivothigh(high, obSwingLength, obSwingLength)
 swingLow  = ta.pivotlow(low, obSwingLength, obSwingLength)
 
@@ -90,21 +118,3 @@ if showOB and not na(swingHigh) and close[obSwingLength] > open[obSwingLength]
     array.push(bearObBoxes, b)
     if alertOnNewOB
         alert("Nouvel Order Block baissier détecté sur " + syminfo.ticker, alert.freq_once_per_bar_close)
-
-manageOb(arr, isBull) =>
-    if array.size(arr) > 0
-        for i = array.size(arr) - 1 to 0
-            b = array.get(arr, i)
-            top = box.get_top(b)
-            bot = box.get_bottom(b)
-            mitigated = isBull ? low <= top : high >= bot
-            if mitigated and obRemoveOnMitigation
-                box.delete(b)
-                array.remove(arr, i)
-                if alertOnMitigation
-                    alert((isBull ? "Order Block haussier" : "Order Block baissier") + " mitigé sur " + syminfo.ticker, alert.freq_once_per_bar_close)
-            else
-                box.set_right(b, bar_index + obExtend)
-
-manageOb(bullObBoxes, true)
-manageOb(bearObBoxes, false)
