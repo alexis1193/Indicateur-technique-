@@ -1,0 +1,11 @@
+//@version=5
+indicator("VWAP Indicator", overlay = true)
+
+// --- Inputs ---
+showVwap = input.bool(true, "Afficher le VWAP")
+
+// --- Calcul ---
+float vw = ta.vwap(hlc3)
+
+// --- Plot ---
+plot(showVwap ? vw : na, "VWAP", color = color.new(color.purple, 0), linewidth = 2)
