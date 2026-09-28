@@ -1,0 +1,57 @@
+//@version=5
+indicator("Support / Résistance Dynamique", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ==================== INPUTS ====================
+swingLen    = input.int(10, "Longueur de détection des swings", minval=1)
+maxLevels   = input.int(10, "Nombre maximum de niveaux affichés", minval=1, maxval=50)
+lineWidth   = input.int(2, "Épaisseur des lignes", minval=1, maxval=5)
+showLabels  = input.bool(true, "Afficher le prix sur chaque niveau")
+
+// Un niveau est vert quand le cours est AU-DESSUS (support), rouge quand il est EN-DESSOUS (résistance)
+supportColor    = color.new(color.green, 0)
+resistanceColor = color.new(color.red, 0)
+
+// ==================== DÉTECTION DES SWINGS ====================
+swingHigh = ta.pivothigh(high, swingLen, swingLen)
+swingLow  = ta.pivotlow(low, swingLen, swingLen)
+
+var array<line>  levels      = array.new<line>()
+var array<label> levelLabels = array.new<label>()
+var array<float> levelPrices = array.new<float>()
+
+// Ajoute un niveau et retire le plus ancien si on dépasse le maximum autorisé
+addLevel(price, pivotBarIndex) =>
+    ln = line.new(pivotBarIndex, price, bar_index, price, color=color.gray, width=lineWidth)
+    lb = showLabels ? label.new(bar_index, price, str.tostring(price, format.mintick), style=label.style_label_left, color=color.gray, textcolor=color.white, size=size.small) : na
+    array.push(levels, ln)
+    array.push(levelLabels, lb)
+    array.push(levelPrices, price)
+    if array.size(levels) > maxLevels
+        line.delete(array.shift(levels))
+        oldLabel = array.shift(levelLabels)
+        if not na(oldLabel)
+            label.delete(oldLabel)
+        array.shift(levelPrices)
+
+if not na(swingHigh)
+    addLevel(swingHigh, bar_index - swingLen)
+
+if not na(swingLow)
+    addLevel(swingLow, bar_index - swingLen)
+
+// ==================== MISE À JOUR COULEUR + EXTENSION ====================
+// À chaque bougie : la ligne s'étend jusqu'au prix actuel et change de couleur
+// selon la position du cours par rapport au niveau.
+if array.size(levels) > 0
+    for i = 0 to array.size(levels) - 1
+        ln    = array.get(levels, i)
+        price = array.get(levelPrices, i)
+        col   = close > price ? supportColor : resistanceColor
+
+        line.set_x2(ln, bar_index)
+        line.set_color(ln, col)
+
+        if showLabels
+            lb = array.get(levelLabels, i)
+            label.set_x(lb, bar_index)
+            label.set_color(lb, col)
