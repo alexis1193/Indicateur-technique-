@@ -19,6 +19,13 @@ RISQUE
   - Kill switch : -3 % sur la journee ou 5 trades -> arret jusqu'au lendemain.
   - Magic number dedie : ne touche jamais aux positions manuelles.
 
+FONCTIONNEMENT 24/5
+  - Boucle incassable : exception loguee, reprise apres 30 s ; 20 erreurs
+    consecutives -> fermeture des positions de l'EA et arret propre.
+  - Reconnexion automatique si le terminal devient injoignable.
+  - Ligne de vie toutes les 15 min :
+    VIVANT | heure Paris | equity | nb positions | nb ordres | en session
+
 CONNEXION / LANCEMENT (variables d'environnement)
   TERMINAL_PATH  chemin de terminal64.exe (repli sur detection auto)
   DEMO_ONLY      1 = refuse un compte reel (defaut 1)
@@ -88,6 +95,10 @@ DEVIATION_POINTS = 30
 
 # Technique
 LOOP_SECONDS = 5
+ERROR_PAUSE_SECONDS = 30      # pause apres une exception
+MAX_CONSECUTIVE_ERRORS = 20   # au-dela : positions fermees et arret propre
+RECONNECT_PAUSE_SECONDS = 30  # pause entre deux tentatives de reconnexion
+HEARTBEAT_MINUTES = 15        # ligne de vie dans le log
 LOCK_PORT = 47615             # verrou anti double-lancement (127.0.0.1)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(BASE_DIR, "xau_fvg_ea.log")
@@ -289,6 +300,14 @@ def resolve_symbol():
     return name
 
 
+class FatalError(Exception):
+    """Erreur qui doit arreter l'EA sans relance (ex : compte reel en DEMO_ONLY)."""
+
+
+def in_session(now_paris):
+    return now_paris.weekday() < 5 and SESSION_START_HOUR <= now_paris.hour < SESSION_END_HOUR
+
+
 # ===========================================================================
 # OUTILS DE MARCHE
 # ===========================================================================
@@ -366,6 +385,54 @@ class EA:
         self.state = self.load_state()
         self.dry_used = set()
         self.last_bar_time = None
+        self.disconnected_since = None
+        self.reconnect_attempts = 0
+
+    # ---- connexion -------------------------------------------------------
+    def ensure_connection(self):
+        """True si le terminal repond et est connecte, sinon tente une reconnexion."""
+        ti, ai = mt5.terminal_info(), mt5.account_info()
+        if ti is not None and ti.connected and ai is not None and ai.login:
+            return True
+        if self.disconnected_since is None:
+            self.disconnected_since = time.time()
+            log.warning("Terminal MT5 injoignable ou deconnecte (%s). Reconnexion...", mt5.last_error())
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
+        # Detail des tentatives seulement a la 1re puis toutes les 10 (evite le spam du log)
+        self.reconnect_attempts += 1
+        verbose = self.reconnect_attempts == 1 or self.reconnect_attempts % 10 == 0
+        if not verbose:
+            log.setLevel(logging.CRITICAL)
+        try:
+            ok = connect()
+        finally:
+            log.setLevel(logging.INFO)
+        if ok:
+            if not check_account():
+                raise FatalError("compte refuse apres reconnexion")
+            mt5.symbol_select(self.symbol, True)
+            log.info("Reconnecte apres %d s de coupure.", time.time() - self.disconnected_since)
+            self.disconnected_since = None
+            self.reconnect_attempts = 0
+            return True
+        log.warning("Reconnexion echouee (coupure depuis %d s). Nouvel essai dans %d s.",
+                    time.time() - self.disconnected_since, RECONNECT_PAUSE_SECONDS)
+        return False
+
+    def heartbeat(self):
+        now = datetime.now(PARIS)
+        ai = mt5.account_info()
+        equity = "%.2f" % ai.equity if ai is not None else "n/d"
+        try:
+            npos, nord = len(self.my_positions()), len(self.my_orders())
+        except Exception:
+            npos = nord = "n/d"
+        log.info("VIVANT | %s Paris | equity %s | positions %s | ordres %s | en session %s",
+                 now.strftime("%Y-%m-%d %H:%M"), equity, npos, nord,
+                 "OUI" if in_session(now) else "NON")
 
     # ---- etat persistant -------------------------------------------------
     def load_state(self):
@@ -637,8 +704,7 @@ class EA:
         self.update_day(now)
         self.count_new_trades()
 
-        in_session = now.weekday() < 5 and SESSION_START_HOUR <= now.hour < SESSION_END_HOUR
-        if not in_session:
+        if not in_session(now):
             if self.my_positions() or self.my_orders():
                 self.flatten("hors session (cloture forcee %dh)" % SESSION_END_HOUR)
             return
@@ -668,11 +734,48 @@ class EA:
 
         self.try_entry(bias, m15, d1)
 
+    def emergency_stop(self):
+        log.critical("%d erreurs consecutives : fermeture des positions de l'EA et arret.",
+                     MAX_CONSECUTIVE_ERRORS)
+        try:
+            if self.ensure_connection():
+                self.flatten("arret d'urgence")
+                left = len(self.my_positions()) + len(self.my_orders())
+                if left and not DRY_RUN:
+                    log.critical("%d position(s)/ordre(s) n'ont pas pu etre fermes : verifiez le terminal !", left)
+            else:
+                log.critical("Terminal injoignable : positions NON fermees, verifiez le terminal !")
+        except Exception:
+            log.exception("Echec de la fermeture d'urgence : verifiez le terminal !")
+
     def run(self):
+        """Boucle incassable. Retourne un code de sortie."""
         log.info("Boucle demarree (toutes les %d s). Ctrl+C pour arreter.", LOOP_SECONDS)
+        errors = 0
+        next_heartbeat = 0.0
         while True:
-            self.step()
-            time.sleep(LOOP_SECONDS)
+            try:
+                if time.time() >= next_heartbeat:
+                    next_heartbeat = time.time() + HEARTBEAT_MINUTES * 60
+                    self.heartbeat()
+                # Une coupure de connexion n'est pas comptee comme une erreur :
+                # l'EA attend le retour du terminal aussi longtemps qu'il le faut.
+                if not self.ensure_connection():
+                    time.sleep(RECONNECT_PAUSE_SECONDS)
+                    continue
+                self.step()
+                errors = 0
+                time.sleep(LOOP_SECONDS)
+            except (KeyboardInterrupt, FatalError):
+                raise
+            except Exception:
+                errors += 1
+                log.exception("Erreur dans la boucle (%d/%d consecutives). Reprise dans %d s.",
+                              errors, MAX_CONSECUTIVE_ERRORS, ERROR_PAUSE_SECONDS)
+                if errors >= MAX_CONSECUTIVE_ERRORS:
+                    self.emergency_stop()
+                    return 5
+                time.sleep(ERROR_PAUSE_SECONDS)
 
 
 # ===========================================================================
@@ -709,13 +812,18 @@ def main():
         si = mt5.symbol_info(symbol)
         log.info("Symbole : %s | digits %d | stops_level %d pts | lot min %.2f pas %.2f",
                  symbol, si.digits, si.trade_stops_level, si.volume_min, si.volume_step)
-        EA(symbol).run()
+        code = EA(symbol).run()
     except KeyboardInterrupt:
         log.info("Arret demande (Ctrl+C). Positions laissees avec leur SL.")
+        code = 0
+    except FatalError as e:
+        log.critical("Arret definitif : %s", e)
+        code = 3
     finally:
         mt5.shutdown()
         lock.close()
-    return 0
+    log.info("EA arrete (code %s).", code)
+    return code
 
 
 if __name__ == "__main__":
